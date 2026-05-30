@@ -178,9 +178,14 @@ def push_all(title, body, markdown, image_url):
             }
         }
         try:
-            requests.post(NOTIFYME_SERVER, json=payload, timeout=10)
-            print("✅ NotifyMe 推送已发送")
-        except: pass
+            resp = requests.post(NOTIFYME_SERVER, json=payload, timeout=10)
+            print("NotifyMe HTTP:", resp.status_code, resp.text[:200])
+            if resp.status_code == 200 and resp.json().get("isSuccess"):
+                print("NotifyMe push sent OK")
+            else:
+                print("NotifyMe push FAILED:", resp.text[:200])
+        except Exception as e:
+            print("NotifyMe exception:", type(e).__name__, str(e))
     
     if BARK_KEY:
         try:
