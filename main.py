@@ -130,11 +130,11 @@ async def render_to_image(processed_data):
             await data_region.screenshot(path=screenshot_file, type="jpeg", quality=90)
             
             await browser.close()
-            print(f"✅ 图片渲染成功: {screenshot_file}")
+            print(f"[OK] 图片渲染成功: {screenshot_file}")
             return screenshot_file
             
     except Exception as e:
-        print(f"❌ 渲染图片失败: {e}")
+        print(f"[FAIL] 渲染图片失败: {e}")
         return None
     finally:
         if os.path.exists(temp_html_path): os.remove(temp_html_path)
@@ -146,13 +146,13 @@ async def upload_to_imgbb(image_path):
             res = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_KEY}, files={"image": f}, timeout=30)
             json_data = res.json()
             if json_data.get("status") == 200:
-                print("✅ 图床上传成功")
+                print("[OK] 图床上传成功")
                 return json_data["data"]["url"]
             else:
-                print(f"❌ 图床上传失败: {json_data.get('error', {}).get('message')}")
+                print(f"[FAIL] 图床上传失败: {json_data.get('error', {}).get('message')}")
                 return None
     except Exception as e:
-        print(f"❌ 图床请求异常: {e}")
+        print(f"[FAIL] 图床请求异常: {e}")
         return None
 
 # ================= 4. CF Worker 群发（可选） =================
@@ -211,7 +211,7 @@ def push_direct(title, body, image_url):
             requests.post(f"https://api.day.app/{BARK_KEY}", data={
                 "title": title, "body": body, "group": "洛克王国", "image": image_url, "isArchive": 1
             }, timeout=10)
-            print("✅ Bark 推送已发送")
+            print("[OK] Bark 推送已发送")
         except Exception as e:
             print(f"Bark exception: {e}")
 
@@ -228,7 +228,7 @@ async def main():
         raw_data, err = None, f"请求异常: {e}"
     
     if err or not raw_data:
-        push_direct("⚠️ 监控异常", err or "无法获取数据", None)
+        push_direct("[WARN] 监控异常", err or "无法获取数据", None)
         return
 
     processed = process_data_for_template(raw_data)
@@ -239,7 +239,7 @@ async def main():
     local_img = await render_to_image(processed)
     img_url = await upload_to_imgbb(local_img)
     
-    title = "📢 远行商人已刷新"
+    title = "远行商人已刷新"
     
     # --- 双重推送 ---
     # 1. 推送给你自己（原有逻辑，永久保留）
@@ -250,9 +250,9 @@ async def main():
         print("正在通过 CF Worker 群发给所有订阅者...")
         cf_ok = push_via_cf(title, push_body, img_url)
         if cf_ok:
-            print("✅ CF Worker 群发成功")
+            print("[OK] CF Worker 群发成功")
         else:
-            print("⚠️ CF Worker 群发失败（已直接推送给你）")
+            print("[WARN] CF Worker 群发失败（已直接推送给你）")
     else:
         print("CF Worker 未配置，跳过群发（已有直接推送）")
 
