@@ -1,6 +1,9 @@
 import os
 import requests
 import asyncio
+import json
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from jinja2 import Environment, FileSystemLoader
 from playwright.async_api import async_playwright
@@ -11,6 +14,10 @@ IMGBB_KEY = os.environ.get("IMGBB_KEY")
 NOTIFYME_UUID = os.environ.get("NOTIFYME_UUID")
 BARK_KEY = os.environ.get("BARK_KEY")
 
+# Cloudflare Worker 群发配置（可选，未配置时走原有直接推送）
+CF_WORKER_URL = os.environ.get("CF_WORKER_URL", "").strip()
+CF_API_KEY = os.environ.get("CF_API_KEY", "").strip()
+
 GAME_API_URL = "https://wegame.shallow.ink/api/v1/games/rocom/merchant/info?refresh=true"
 NOTIFYME_SERVER = "https://notifyme-server.wzn556.top/api/send"
 ASSETS_DIR = os.path.abspath("assets/yuanxing-shangren")
@@ -20,31 +27,26 @@ TEMP_RENDER_FILE = "temp_render.html"
 # ================= 2. 时间与数据处理逻辑 =================
 
 def get_beijing_time():
-    """获取精准的北京时间"""
     return datetime.now(timezone(timedelta(hours=8)))
 
 def format_timestamp(ts_ms):
-    """格式化时间戳为 HH:mm"""
     if not ts_ms: return "--:--"
     dt = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone(timedelta(hours=8)))
     return dt.strftime("%H:%M")
 
 def get_round_info():
-    """计算当前远行商人的轮次与倒计时"""
     now = get_beijing_time()
     start_time = now.replace(hour=8, minute=0, second=0, microsecond=0)
     
     if now < start_time:
         return {"current": "未开放", "total": 4, "countdown": "尚未开市"}
     
-    # 每 4 小时一轮: 08-12, 12-16, 16-20, 20-00
     delta_seconds = int((now - start_time).total_seconds())
     round_index = (delta_seconds // (4 * 3600)) + 1
     
     if round_index > 4:
         return {"current": 4, "total": 4, "countdown": "今日已收市"}
     
-    # 计算本轮剩余时间
     round_end = start_time + timedelta(hours=round_index * 4)
     remaining = round_end - now
     hours, rem = divmod(int(remaining.total_seconds()), 3600)
@@ -59,7 +61,6 @@ def get_round_info():
     }
 
 def process_data_for_template(data):
-    """清洗接口数据，精准筛选当前轮次商品"""
     if not data: return {}
     
     now_ms = int(get_beijing_time().timestamp() * 1000)
@@ -94,17 +95,14 @@ def process_data_for_template(data):
         "product_count": len(active_products),
         "round_info": round_info,
         "products": active_products,
-        
-        # --- 为了完美适配最初的原版 index.html 增加的变量 ---
-        "_res_path": "",  # 留空，让 HTML 里的相对路径生效读取本地 ttf 和 img
-        "background": "img/bg.C8CUoi7I.jpg", # 激活原版的背景图
-        "titleIcon": True # 激活原版的 Logo 显示
+        "_res_path": "",
+        "background": "img/bg.C8CUoi7I.jpg",
+        "titleIcon": True
     }
 
 # ================= 3. 图像渲染与上传 =================
 
 async def render_to_image(processed_data):
-    """渲染 HTML 并精准切割截图"""
     if not processed_data or processed_data["product_count"] == 0:
         print("当前无活跃商品，跳过渲染")
         return None
@@ -123,21 +121,16 @@ async def render_to_image(processed_data):
         async with async_playwright() as p:
             browser = await p.chromium.launch()
             page = await browser.new_page()
-            
-            # --- 避开手机端错乱排版，恢复完美宽度 ---
             await page.set_viewport_size({"width": 900, "height": 1200})
             await page.goto(f"file://{temp_html_path}")
-            
-            # 等待字体加载完成
             await page.evaluate("document.fonts.ready")
             await page.wait_for_load_state("networkidle")
             
-            # --- 定位原版 HTML 的包裹容器 ---
             data_region = page.locator('.merchant-page')
             await data_region.screenshot(path=screenshot_file, type="jpeg", quality=90)
             
             await browser.close()
-            print(f"✅ 图片渲染成功 (精准切割): {screenshot_file}")
+            print(f"✅ 图片渲染成功: {screenshot_file}")
             return screenshot_file
             
     except Exception as e:
@@ -147,7 +140,6 @@ async def render_to_image(processed_data):
         if os.path.exists(temp_html_path): os.remove(temp_html_path)
 
 async def upload_to_imgbb(image_path):
-    """上传到 ImgBB 图床"""
     if not image_path or not IMGBB_KEY: return None
     try:
         with open(image_path, "rb") as f:
@@ -163,27 +155,54 @@ async def upload_to_imgbb(image_path):
         print(f"❌ 图床请求异常: {e}")
         return None
 
-# ================= 4. 推送分发 =================
+# ================= 4. CF Worker 群发（可选） =================
 
-def push_all(title, body, markdown, image_url):
-    """执行双通道推送"""
+def push_via_cf(title, body, image_url):
+    """通过 Cloudflare Worker 群发给所有订阅者"""
+    if not CF_WORKER_URL or not CF_API_KEY:
+        print("CF_WORKER_URL / CF_API_KEY 未配置，跳过群发")
+        return False
+    
+    try:
+        payload = {
+            "title": title,
+            "body": body,
+            "image_url": image_url or ""
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "X-Api-Key": CF_API_KEY
+        }
+        resp = requests.post(
+            f"{CF_WORKER_URL}/broadcast",
+            json=payload,
+            headers=headers,
+            timeout=60
+        )
+        print(f"CF Worker 群发响应: {resp.status_code} {resp.text[:300]}")
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"CF Worker 群发异常: {e}")
+        return False
+
+# ================= 5. 直接推送（原有方式，仍然保留） =================
+
+def push_direct(title, body, image_url):
+    """直接推送给你自己（原有方式）"""
+    # 同时推 NotifyMe + Bark
     if NOTIFYME_UUID:
         payload = {
             "data": {
                 "uuid": NOTIFYME_UUID, "ttl": 86400, "priority": "high",
                 "data": {
                     "title": title, "body": body, "group": "洛克王国", "bigText": True, "record": 1,
-                    "markdown": f"{markdown}\n\n![render]({image_url})" if image_url else markdown
+                    "markdown": f"{body}\n\n![render]({image_url})" if image_url else body
                 }
             }
         }
         try:
             resp = requests.post(NOTIFYME_SERVER, json=payload, timeout=10)
             print("NotifyMe HTTP:", resp.status_code, resp.text[:200])
-            if resp.status_code == 200 and resp.json().get("isSuccess"):
-                print("NotifyMe push sent OK")
-            else:
-                print("NotifyMe push FAILED:", resp.text[:200])
         except Exception as e:
             print("NotifyMe exception:", type(e).__name__, str(e))
     
@@ -195,9 +214,10 @@ def push_all(title, body, markdown, image_url):
             print("✅ Bark 推送已发送")
         except: pass
 
-# ================= 5. 主入口 =================
+# ================= 6. 主入口 =================
 
 async def main():
+    # --- 获取数据 ---
     try:
         resp = requests.get(GAME_API_URL, headers={"X-API-Key": ROCOM_API_KEY}, timeout=30)
         resp.raise_for_status()
@@ -207,17 +227,33 @@ async def main():
         raw_data, err = None, f"请求异常: {e}"
     
     if err or not raw_data:
-        push_all("⚠️ 监控异常", err or "无法获取数据", "无法获取数据", None)
+        push_direct("⚠️ 监控异常", err or "无法获取数据", None)
         return
 
     processed = process_data_for_template(raw_data)
     item_names = [p["name"] for p in processed["products"]]
     push_body = f"当前售卖: {'、'.join(item_names)}" if item_names else "当前暂无商品"
     
+    # --- 渲染图片 ---
     local_img = await render_to_image(processed)
     img_url = await upload_to_imgbb(local_img)
     
-    push_all("📢 远行商人已刷新", push_body, "### 🛒 商人刷新详情", img_url)
+    title = "📢 远行商人已刷新"
+    
+    # --- 双重推送 ---
+    # 1. 推送给你自己（原有逻辑，永久保留）
+    push_direct(title, push_body, img_url)
+    
+    # 2. 通过 CF Worker 群发给所有订阅者（可选）
+    if CF_WORKER_URL and CF_API_KEY:
+        print("正在通过 CF Worker 群发给所有订阅者...")
+        cf_ok = push_via_cf(title, push_body, img_url)
+        if cf_ok:
+            print("✅ CF Worker 群发成功")
+        else:
+            print("⚠️ CF Worker 群发失败（已直接推送给你）")
+    else:
+        print("CF Worker 未配置，跳过群发（已有直接推送）")
 
 if __name__ == "__main__":
     asyncio.run(main())
