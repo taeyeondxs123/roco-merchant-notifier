@@ -1,9 +1,15 @@
+import sys, io
+# 强制 stdout/stderr 使用 UTF-8，避免 Windows/GBK 环境 UnicodeEncodeError
+if hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'buffer'):
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 import os
 import requests
 import asyncio
 import json
 import subprocess
-import sys
 from datetime import datetime, timedelta, timezone
 from jinja2 import Environment, FileSystemLoader
 from playwright.async_api import async_playwright
@@ -104,7 +110,7 @@ def process_data_for_template(data):
 
 async def render_to_image(processed_data):
     if not processed_data or processed_data["product_count"] == 0:
-        print("当前无活跃商品，跳过渲染")
+        print("[INFO] 当前无活跃商品，跳过渲染")
         return None
     
     screenshot_file = "merchant_render.jpg"
@@ -130,7 +136,7 @@ async def render_to_image(processed_data):
             await data_region.screenshot(path=screenshot_file, type="jpeg", quality=90)
             
             await browser.close()
-            print(f"[OK] 图片渲染成功: {screenshot_file}")
+            print("[OK] 图片渲染成功: {screenshot_file}")
             return screenshot_file
             
     except Exception as e:
@@ -160,7 +166,7 @@ async def upload_to_imgbb(image_path):
 def push_via_cf(title, body, image_url):
     """通过 Cloudflare Worker 群发给所有订阅者"""
     if not CF_WORKER_URL or not CF_API_KEY:
-        print("CF_WORKER_URL / CF_API_KEY 未配置，跳过群发")
+        print("[INFO] CF_WORKER_URL / CF_API_KEY 未配置，跳过群发")
         return False
     
     try:
@@ -179,17 +185,16 @@ def push_via_cf(title, body, image_url):
             headers=headers,
             timeout=60
         )
-        print(f"CF Worker 群发响应: {resp.status_code} {resp.text[:300]}")
+        print(f"[INFO] CF Worker 群发响应: {resp.status_code} {resp.text[:300]}")
         return resp.status_code == 200
     except Exception as e:
-        print(f"CF Worker 群发异常: {e}")
+        print(f"[FAIL] CF Worker 群发异常: {e}")
         return False
 
 # ================= 5. 直接推送（原有方式，仍然保留） =================
 
 def push_direct(title, body, image_url):
     """直接推送给你自己（原有方式）"""
-    # 同时推 NotifyMe + Bark
     if NOTIFYME_UUID:
         payload = {
             "data": {
@@ -202,9 +207,9 @@ def push_direct(title, body, image_url):
         }
         try:
             resp = requests.post(NOTIFYME_SERVER, json=payload, timeout=10)
-            print("NotifyMe HTTP:", resp.status_code, resp.text[:200])
+            print(f"[INFO] NotifyMe HTTP: {resp.status_code} {resp.text[:200]}")
         except Exception as e:
-            print("NotifyMe exception:", type(e).__name__, str(e))
+            print(f"[FAIL] NotifyMe exception: {type(e).__name__} {e}")
     
     if BARK_KEY:
         try:
@@ -213,7 +218,7 @@ def push_direct(title, body, image_url):
             }, timeout=10)
             print("[OK] Bark 推送已发送")
         except Exception as e:
-            print(f"Bark exception: {e}")
+            print(f"[FAIL] Bark exception: {type(e).__name__} {e}")
 
 # ================= 6. 主入口 =================
 
@@ -247,14 +252,14 @@ async def main():
     
     # 2. 通过 CF Worker 群发给所有订阅者（可选）
     if CF_WORKER_URL and CF_API_KEY:
-        print("正在通过 CF Worker 群发给所有订阅者...")
+        print("[INFO] 正在通过 CF Worker 群发给所有订阅者...")
         cf_ok = push_via_cf(title, push_body, img_url)
         if cf_ok:
             print("[OK] CF Worker 群发成功")
         else:
             print("[WARN] CF Worker 群发失败（已直接推送给你）")
     else:
-        print("CF Worker 未配置，跳过群发（已有直接推送）")
+        print("[INFO] CF Worker 未配置，跳过群发（已有直接推送）")
 
 if __name__ == "__main__":
     asyncio.run(main())
