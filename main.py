@@ -212,7 +212,8 @@ def push_direct(title, body, image_url):
                 "title": title, "body": body, "group": "洛克王国", "image": image_url, "isArchive": 1
             }, timeout=10)
             print("✅ Bark 推送已发送")
-        except: pass
+        except Exception as e:
+            print(f"Bark exception: {e}")
 
 # ================= 6. 主入口 =================
 
