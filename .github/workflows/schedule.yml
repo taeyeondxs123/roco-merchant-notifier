@@ -1,37 +1,32 @@
-name: Roco Merchant Notifier (Pro)
-
+name: Run notifier
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '1 0,4,8,12 * * *'
 
 jobs:
   run-notifier:
     runs-on: ubuntu-latest
+    env:
+      ROCOM_API_KEY: ${{ secrets.ROCOM_API_KEY }}
+      IMGBB_KEY: ${{ secrets.IMGBB_KEY }}
+      BARK_KEY: ${{ secrets.BARK_KEY }}
+      NOTIFYME_UUID: ${{ secrets.NOTIFYME_UUID }}
+      CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+      CF_API_KEY: ${{ secrets.CF_API_KEY }}
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests playwright jinja2
-
-      - name: Install Playwright Browsers & OS Dependencies
-        run: |
-          playwright install chromium --with-deps
-          sudo apt-get install -y fonts-wqy-zenhei
+      - name: Install dependencies
+        run: pip install requests Pillow
 
       - name: Run Notifier Script
-        env:
-          ROCOM_API_KEY: ${{ secrets.ROCOM_API_KEY }}
-          IMGBB_KEY: ${{ secrets.IMGBB_KEY }}
-          NOTIFYME_UUID: ${{ secrets.NOTIFYME_UUID }}
-          BARK_KEY: ${{ secrets.BARK_KEY }}
-          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
-          CF_API_KEY: ${{ secrets.CF_API_KEY }}
-          PYTHONIOENCODING: utf-8
         run: python main.py
+        env:
+          PYTHONIOENCODING: utf-8
