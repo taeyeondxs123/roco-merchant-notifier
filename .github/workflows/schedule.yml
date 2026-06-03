@@ -24,7 +24,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests Pillow jinja2
+        run: pip install requests Pillow jinja2 playwright
 
       - name: Run Notifier Script
         run: python main.py
