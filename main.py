@@ -1,4 +1,4 @@
-﻿import os, asyncio, json, base64, re, urllib.request, time
+import os, asyncio, json, base64, re, urllib.request, time
 import requests
 
 NOTIFYME_UUID = os.environ.get("NOTIFYME_UUID", "").strip()
@@ -10,6 +10,12 @@ GITHUB_REPO   = os.environ.get("GITHUB_REPOSITORY", "")
 GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN", "")
 SUBSCRIBERS_FILE = "subscribers.json"
 
+print(f"[DEBUG] BARK_KEY: {'已配置' if BARK_KEY else '未配置'} ({len(BARK_KEY)}字符)")
+print(f"[DEBUG] NOTIFYME_UUID: {'已配置' if NOTIFYME_UUID else '未配置'} ({len(NOTIFYME_UUID)}字符)")
+print(f"[DEBUG] ROCOM_API_KEY: {'已配置' if ROCOM_API_KEY else '未配置'} ({len(ROCOM_API_KEY)}字符)")
+print(f"[DEBUG] IMGBB_KEY: {'已配置' if IMGBB_KEY else '未配置'} ({len(IMGBB_KEY)}字符)")
+print(f"[DEBUG] GITHUB_TOKEN: {'已配置' if GITHUB_TOKEN else '未配置'} ({len(GITHUB_TOKEN)}字符)")
+
 def gh_get_file(path):
     if not GITHUB_TOKEN:
         return None
@@ -18,7 +24,8 @@ def gh_get_file(path):
     try:
         with urllib.request.urlopen(req) as r:
             return json.loads(r.read())
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG] gh_get_file 失败: {e}")
         return None
 
 def load_subscribers():
@@ -29,6 +36,8 @@ def load_subscribers():
     content = base64.b64decode(info["content"]).decode("utf-8")
     subs = json.loads(content)
     print(f"[INFO] 加载到 {len(subs)} 位订阅者")
+    for s in subs:
+        print(f"[DEBUG] 订阅者: platform={s.get('platform')}, key={s.get('key','')[:8]}...")
     return subs
 
 def push_bark(bark_key, title, body, image_url):
@@ -39,6 +48,7 @@ def push_bark(bark_key, title, body, image_url):
         payload["thumbnail"] = image_url
     try:
         resp = requests.get(url, params=payload, timeout=30)
+        print(f"[DEBUG] Bark 响应: {resp.status_code} | key={bark_key[:8]}...")
         return resp.status_code == 200
     except Exception as e:
         print(f"[Bark 推送异常] {e}")
@@ -61,6 +71,7 @@ def push_notifyme(uuid, title, body, image_url):
             headers={"Content-Type": "application/json"},
             timeout=30
         )
+        print(f"[DEBUG] NotifyMe 响应: {resp.status_code}")
         return resp.status_code == 200
     except Exception as e:
         print(f"[NotifyMe 推送异常] {e}")
@@ -98,7 +109,7 @@ def upload_image_sync(image_bytes):
     ext   = "png"
     fname = f"roco_{uuid.uuid4().hex[:8]}.{ext}"
     url   = "https://api.imgbb.com/1/upload"
-    files = {"image": (fname, image_bytes, f"image/{ext}")}
+    files = {"image": (fname, image_bytes, f"image/{ext}")]
     data  = {"key": IMGBB_KEY}
     resp  = requests.post(url, files=files, data=data, timeout=30)
     resp.raise_for_status()
@@ -123,7 +134,7 @@ def render_and_upload(goods):
         fnt = ImageFont.load_default()
         fnt_sm = fnt
 
-    draw.text((375, 55), "洛克王国 · 远行商人", fill="white", font=fnt, anchor="mm")
+    draw.text((375, 55), "\u6d1b\u514b\u738b\u56fd \u00b7 \u8fdc\u884c\u5546\u4eba", fill="white", font=fnt, anchor="mm")
     y = 130
     COLS = 5
     CW, CH = 120, 120
@@ -189,7 +200,7 @@ def push_bark_direct(bark_key, title, body, image_url):
     try:
         resp = requests.get(url, params=payload, timeout=30)
         if resp.status_code == 200:
-            print(f"[INFO] Bark 推送已发送")
+            print(f"[INFO] Bark 推送已发送 (key={bark_key[:8]}...)")
             return True
         else:
             print(f"[WARN] Bark HTTP: {resp.status_code}")
@@ -213,13 +224,19 @@ async def main():
         print(f"[INFO] 获取到 {len(goods)} 个商品")
 
         if not goods:
-            print("[INFO] 无商品，跳过推送")
+            print("[INFO] 无商品，发送无商品通知")
+            push_direct("\u8fdc\u884c\u5546\u4eba - \u5f53\u524d\u65e0\u5546\u54c1", "\u76ee\u524d\u8fdc\u884c\u5546\u4eba\u5904\u6682\u65e0\u5546\u54c1\u4e0a\u67b6\uff0c\u4e0b\u6b21\u66f4\u65b0\u8bf7\u67e5\u770b\u3002", None)
+
+            subs = load_subscribers()
+            if subs:
+                for sub in subs:
+                    push_to_subscriber(sub, "\u8fdc\u884c\u5546\u4eba - \u65e0\u5546\u54c1", "\u76ee\u524d\u6682\u65e0\u5546\u54c1", None)
             return
 
         goods_list = ", ".join([g.get("name", "?") for g in goods[:10]])
         print(f"[INFO] 商品: {goods_list}")
 
-        title = f"远行商人来了！共 {len(goods)} 件商品"
+        title = f"\u8fdc\u884c\u5546\u4eba\u6765\u4e86\uff01\u5171 {len(goods)} \u4ef6\u5546\u54c1"
         push_body = goods_list
         img_url = render_and_upload(goods)
         if img_url:
@@ -251,6 +268,6 @@ async def main():
     except Exception as e:
         import traceback
         traceback.print_exc()
-        push_direct("[WARN] 监控异常", str(e), None)
+        push_direct("[WARN] \u76d1\u63a7\u5f02\u5e38", str(e), None)
 
 asyncio.run(main())
