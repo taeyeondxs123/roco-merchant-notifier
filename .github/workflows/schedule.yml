@@ -1,33 +1,33 @@
-name: Run notifier
+name: roco-merchant-notifier
+
 on:
   workflow_dispatch:
 
 jobs:
-  run-notifier:
+  notifier:
     runs-on: ubuntu-latest
-    env:
-      ROCOM_API_KEY: ${{ secrets.ROCOM_API_KEY }}
-      IMGBB_KEY: ${{ secrets.IMGBB_KEY }}
-      BARK_KEY: ${{ secrets.BARK_KEY }}
-      NOTIFYME_UUID: ${{ secrets.NOTIFYME_UUID }}
-      CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
-      CF_API_KEY: ${{ secrets.CF_API_KEY }}
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: 设置 Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install dependencies
-        run: pip install requests Pillow jinja2 playwright
+      - name: 安装依赖
+        run: pip install requests pillow pillow-avif-plugin pycoral pyjion
+        env:
+          PYTHONIOENCODING: utf-8
 
-      - name: Install Playwright browser
-        run: playwright install chromium
+      - name: 安装 Playwright Chromium
+        run: pip install playwright && playwright install chromium
 
-      - name: Run Notifier Script
+      - name: 运行监控脚本
         run: python main.py
         env:
           PYTHONIOENCODING: utf-8
+          ROCOM_API_KEY: ${{ secrets.ROCOM_API_KEY }}
+          IMGBB_KEY: ${{ secrets.IMGBB_KEY }}
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          NOTIFYME_UUID: ${{ secrets.NOTIFYME_UUID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
