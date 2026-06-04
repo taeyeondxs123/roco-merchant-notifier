@@ -1,0 +1,112 @@
+﻿name: subscribe
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  subscribe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: handle subscribe/unsubscribe
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY:  ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GH_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 << 'PYEOF'
+import json, os, re, urllib.request
+
+title = os.environ["ISSUE_TITLE"].strip()
+body  = os.environ["ISSUE_BODY"].strip()
+n     = os.environ["ISSUE_NUMBER"]
+token = os.environ["GH_TOKEN"]
+REPO  = os.environ["GITHUB_REPOSITORY"]
+BASE  = f"https://api.github.com/repos/{REPO}"
+
+with open("subscribers.json","r",encoding="utf-8") as f:
+    subs = json.load(f)
+
+def save():
+    with open("subscribers.json","w",encoding="utf-8") as f:
+        json.dump(subs, f, ensure_ascii=False, indent=2)
+
+def post_comment(msg):
+    data = json.dumps({"body": msg}).encode()
+    req  = urllib.request.Request(
+        f"{BASE}/issues/{n}/comments",
+        data=data,
+        headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json", "Content-Type": "application/json"},
+        method="POST")
+    urllib.request.urlopen(req)
+
+def close_issue():
+    data = json.dumps({"state": "closed"}).encode()
+    req  = urllib.request.Request(
+        f"{BASE}/issues/{n}",
+        data=data,
+        headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json", "Content-Type": "application/json"},
+        method="PATCH")
+    urllib.request.urlopen(req)
+
+# === 订阅 ===
+if title in ("订阅", "订阅！", "subscribe"):
+    plat = re.search(r"平台[：:]\s*(\S+)", body)
+    bk   = re.search(r"Bark[_\s]?Key[：:]\s*(\S+)", body, re.IGNORECASE)
+    nm   = re.search(r"NotifyMe[_\s]?UUID[：:]\s*(\S+)", body, re.IGNORECASE)
+
+    if not plat:
+        post_comment("格式错误：请写「平台：Bark」或「平台：NotifyMe」")
+        close_issue(); exit(0)
+
+    p = plat.group(1).lower()
+
+    if "bark" in p:
+        key = bk.group(1) if bk else None
+        if not key:
+            post_comment("缺少 Bark_Key，请按格式填写「Bark_Key：xxxxx」")
+            close_issue(); exit(0)
+        sub = {"platform": "bark", "key": key}
+    else:
+        key = nm.group(1) if nm else None
+        if not key:
+            post_comment("缺少 NotifyMe_UUID，请按格式填写「NotifyMe_UUID：xxxxx」")
+            close_issue(); exit(0)
+        sub = {"platform": "notifyme", "key": key}
+
+    for s in subs:
+        if s.get("key") == key:
+            post_comment(f"你已经订阅过了！Key：{key[:6]}...  一切正常。")
+            close_issue(); exit(0)
+
+    subs.append(sub)
+    save()
+    post_comment(f"订阅成功！\n平台：{p}\nKey：{key[:6]}...\n推送时会同步通知你 🎉")
+    close_issue()
+
+# === 退订 ===
+elif title in ("退订", "退订！", "unsubscribe"):
+    bk = re.search(r"Bark[_\s]?Key[：:]\s*(\S+)", body, re.IGNORECASE)
+    nm = re.search(r"NotifyMe[_\s]?UUID[：:]\s*(\S+)", body, re.IGNORECASE)
+    key = (bk.group(1) if bk else (nm.group(1) if nm else None))
+
+    if not key:
+        post_comment("退订格式：请填写「Bark_Key：xxxx」或「NotifyMe_UUID：xxxx」")
+        close_issue(); exit(0)
+
+    before = len(subs)
+    subs = [s for s in subs if s.get("key") != key]
+
+    if len(subs) == before:
+        post_comment("未找到订阅记录，无需退订。")
+    else:
+        save()
+        post_comment(f"退订成功，已移除 Key：{key[:6]}...  后会有期！")
+    close_issue()
+
+# === 其他 Issue 直接关闭 ===
+else:
+    close_issue()
+PYEOF
