@@ -1,273 +1,223 @@
-import os, asyncio, json, base64, re, urllib.request, time
+import os
 import requests
+import asyncio
+from datetime import datetime, timedelta, timezone
+from jinja2 import Environment, FileSystemLoader
+from playwright.async_api import async_playwright
 
-NOTIFYME_UUID = os.environ.get("NOTIFYME_UUID", "").strip()
-BARK_KEY      = os.environ.get("BARK_KEY", "").strip()
-ROCOM_API_KEY = os.environ.get("ROCOM_API_KEY", "").strip()
-IMGBB_KEY     = os.environ.get("IMGBB_KEY", "").strip()
+# ================= 1. 配置区域 =================
+ROCOM_API_KEY = os.environ.get("ROCOM_API_KEY")
+IMGBB_KEY = os.environ.get("IMGBB_KEY")
+NOTIFYME_UUID = os.environ.get("NOTIFYME_UUID")
+BARK_KEY = os.environ.get("BARK_KEY")
 
-GITHUB_REPO   = os.environ.get("GITHUB_REPOSITORY", "")
-GITHUB_TOKEN  = os.environ.get("GITHUB_TOKEN", "")
-SUBSCRIBERS_FILE = "subscribers.json"
+GAME_API_URL = "https://wegame.shallow.ink/api/v1/games/rocom/merchant/info?refresh=true"
+NOTIFYME_SERVER = "https://notifyme-server.wzn556.top/api/send"
+ASSETS_DIR = os.path.abspath("assets/yuanxing-shangren")
+HTML_TEMPLATE_FILE = "index.html"
+TEMP_RENDER_FILE = "temp_render.html"
 
-print(f"[DEBUG] BARK_KEY: {'已配置' if BARK_KEY else '未配置'} ({len(BARK_KEY)}字符)")
-print(f"[DEBUG] NOTIFYME_UUID: {'已配置' if NOTIFYME_UUID else '未配置'} ({len(NOTIFYME_UUID)}字符)")
-print(f"[DEBUG] ROCOM_API_KEY: {'已配置' if ROCOM_API_KEY else '未配置'} ({len(ROCOM_API_KEY)}字符)")
-print(f"[DEBUG] IMGBB_KEY: {'已配置' if IMGBB_KEY else '未配置'} ({len(IMGBB_KEY)}字符)")
-print(f"[DEBUG] GITHUB_TOKEN: {'已配置' if GITHUB_TOKEN else '未配置'} ({len(GITHUB_TOKEN)}字符)")
+# ================= 2. 时间与数据处理逻辑 =================
 
-def gh_get_file(path):
-    if not GITHUB_TOKEN:
-        return None
-    url  = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
-    req  = urllib.request.Request(url, headers={"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"})
-    try:
-        with urllib.request.urlopen(req) as r:
-            return json.loads(r.read())
-    except Exception as e:
-        print(f"[DEBUG] gh_get_file 失败: {e}")
-        return None
+def get_beijing_time():
+    """获取精准的北京时间"""
+    return datetime.now(timezone(timedelta(hours=8)))
 
-def load_subscribers():
-    info = gh_get_file(SUBSCRIBERS_FILE)
-    if not info:
-        print("[INFO] 未找到订阅者文件，跳过群发")
-        return []
-    content = base64.b64decode(info["content"]).decode("utf-8")
-    subs = json.loads(content)
-    print(f"[INFO] 加载到 {len(subs)} 位订阅者")
-    for s in subs:
-        print(f"[DEBUG] 订阅者: platform={s.get('platform')}, key={s.get('key','')[:8]}...")
-    return subs
+def format_timestamp(ts_ms):
+    """格式化时间戳为 HH:mm"""
+    if not ts_ms: return "--:--"
+    dt = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone(timedelta(hours=8)))
+    return dt.strftime("%H:%M")
 
-def push_bark(bark_key, title, body, image_url):
-    url = f"https://api.day.app/{bark_key}"
-    payload = {"title": title, "body": body}
-    if image_url:
-        payload["icon"] = image_url
-        payload["thumbnail"] = image_url
-    try:
-        resp = requests.get(url, params=payload, timeout=30)
-        print(f"[DEBUG] Bark 响应: {resp.status_code} | key={bark_key[:8]}...")
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"[Bark 推送异常] {e}")
-        return False
-
-def push_notifyme(uuid, title, body, image_url):
-    payload = {
-        "data": {
-            "title": title,
-            "content": body,
-            "picture": image_url or ""
-        },
-        "priority": "high",
-        "ttl": 3600
+def get_round_info():
+    """计算当前远行商人的轮次与倒计时"""
+    now = get_beijing_time()
+    start_time = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    
+    if now < start_time:
+        return {"current": "未开放", "total": 4, "countdown": "尚未开市"}
+    
+    # 每 4 小时一轮: 08-12, 12-16, 16-20, 20-00
+    delta_seconds = int((now - start_time).total_seconds())
+    round_index = (delta_seconds // (4 * 3600)) + 1
+    
+    if round_index > 4:
+        return {"current": 4, "total": 4, "countdown": "今日已收市"}
+    
+    # 计算本轮剩余时间
+    round_end = start_time + timedelta(hours=round_index * 4)
+    remaining = round_end - now
+    hours, rem = divmod(int(remaining.total_seconds()), 3600)
+    minutes, _ = divmod(rem, 60)
+    
+    countdown_str = f"{hours}小时{minutes}分钟" if hours > 0 else f"{minutes}分钟"
+    
+    return {
+        "current": round_index,
+        "total": 4,
+        "countdown": countdown_str
     }
-    try:
-        resp = requests.post(
-            f"https://api.notifymye.io/v2/notify/{uuid}",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        print(f"[DEBUG] NotifyMe 响应: {resp.status_code}")
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"[NotifyMe 推送异常] {e}")
-        return False
 
-def push_to_subscriber(sub, title, body, image_url):
-    plat = sub.get("platform", "").lower()
-    key  = sub.get("key", "")
-    if not key:
-        return False
-    if plat == "bark":
-        return push_bark(key, title, body, image_url)
-    elif plat == "notifyme":
-        return push_notifyme(key, title, body, image_url)
-    else:
-        print(f"[WARN] 未知平台: {plat}")
-        return False
-
-async def fetch_goods():
-    url = "https://db3.rocom.peerfun.cn/api/game/merchant/current"
-    headers = {
-        "ROCOM-API-KEY": ROCOM_API_KEY,
-        "Accept": "application/json"
-    }
-    async with asyncio.Lock():
-        resp = await asyncio.to_thread(requests.get, url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("code") != 200 and data.get("retcode") != 0:
-            raise Exception(f"API 返回错误: {data}")
-        return data["data"]["goods"]
-
-def upload_image_sync(image_bytes):
-    import uuid
-    ext   = "png"
-    fname = f"roco_{uuid.uuid4().hex[:8]}.{ext}"
-    url   = "https://api.imgbb.com/1/upload"
-    files = {"image": (fname, image_bytes, f"image/{ext}")]
-    data  = {"key": IMGBB_KEY}
-    resp  = requests.post(url, files=files, data=data, timeout=30)
-    resp.raise_for_status()
-    resp_json = resp.json()
-    if resp_json.get("success"):
-        return resp_json["data"]["url"]
-    raise Exception(f"图床返回失败: {resp_json}")
-
-def render_and_upload(goods):
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except Exception as e:
-        print(f"[ERROR] Pillow 导入失败: {e}")
-        return None
-    W, H = 750, 600
-    bg = Image.new("RGB", (W, H), "#1e1e2e")
-    draw = ImageDraw.Draw(bg)
-    try:
-        fnt = ImageFont.truetype("msyh.ttc", 36)
-        fnt_sm = ImageFont.truetype("msyh.ttc", 28)
-    except:
-        fnt = ImageFont.load_default()
-        fnt_sm = fnt
-
-    draw.text((375, 55), "\u6d1b\u514b\u738b\u56fd \u00b7 \u8fdc\u884c\u5546\u4eba", fill="white", font=fnt, anchor="mm")
-    y = 130
-    COLS = 5
-    CW, CH = 120, 120
-    PAD   = 15
-    grid_w = COLS * CW + (COLS - 1) * PAD
-    start_x = (W - grid_w) // 2
-    for i, g in enumerate(goods[:15]):
-        row, col = divmod(i, COLS)
-        cx = start_x + col * (CW + PAD)
-        cy = y + row * (CH + PAD)
-        try:
-            from PIL import Image as PILImage
-            import io, urllib.request as req
-            img_data = req.urlopen(g["image"], timeout=10).read()
-            img = PILImage.open(io.BytesIO(img_data)).resize((CW, CH), PILImage.LANCZOS)
-            img_circle = img.copy()
-            mask = PILImage.new("L", (CW, CH), 0)
-            mask_draw = ImageDraw.Draw(mask)
-            mask_draw.ellipse((0, 0, CW, CH), fill=255)
-            img_circle.putalpha(mask)
-            bg.paste(img_circle, (cx, cy), img_circle)
-        except Exception as e:
-            draw.ellipse([cx, cy, cx+CW, cy+CH], fill="#333")
-        name = g.get("name", "?")
-        draw.text((cx + CW//2, cy + CW + 14), name, fill="white", font=fnt_sm, anchor="mm")
-    buf = io.BytesIO()
-    bg.save(buf, format="PNG", optimize=True)
-    return upload_image_sync(buf.getvalue())
-
-def push_notifyme_direct(uuid, title, body, image_url):
-    payload = {
-        "data": {
-            "title": title,
-            "content": body,
-            "picture": image_url or ""
-        },
-        "priority": "high",
-        "ttl": 3600
-    }
-    try:
-        resp = requests.post(
-            f"https://api.notifymye.io/v2/notify/{uuid}",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=30
-        )
-        if resp.status_code == 200:
-            print(f"[INFO] NotifyMe HTTP: 200")
-            return True
+def process_data_for_template(data):
+    """清洗接口数据，精准筛选当前轮次商品"""
+    if not data: return {}
+    
+    now_ms = int(get_beijing_time().timestamp() * 1000)
+    round_info = get_round_info()
+    
+    activities = data.get("merchantActivities") or []
+    activity = activities[0] if activities else {}
+    all_items = (activity.get("get_props") or []) + (activity.get("get_pets") or [])
+    
+    active_products = []
+    for item in all_items:
+        s_time = item.get("start_time")
+        e_time = item.get("end_time")
+        
+        if s_time and e_time:
+            if int(s_time) <= now_ms < int(e_time):
+                active_products.append({
+                    "name": item.get("name", "未知"),
+                    "image": item.get("icon_url", ""),
+                    "time_label": f"{format_timestamp(s_time)} - {format_timestamp(e_time)}"
+                })
         else:
-            print(f"[WARN] NotifyMe HTTP: {resp.status_code} {resp.text[:100]}")
-            return False
-    except Exception as e:
-        print(f"[WARN] NotifyMe 异常: {e}")
-        return False
+            active_products.append({
+                "name": item.get("name", "未知"),
+                "image": item.get("icon_url", ""),
+                "time_label": "全天供应"
+            })
+            
+    return {
+        "title": activity.get("name", "远行商人"),
+        "subtitle": activity.get("start_date", "每日 08:00 / 12:00 / 16:00 / 20:00 刷新"),
+        "product_count": len(active_products),
+        "round_info": round_info,
+        "products": active_products,
+        
+        # --- 为了完美适配最初的原版 index.html 增加的变量 ---
+        "_res_path": "",  # 留空，让 HTML 里的相对路径生效读取本地 ttf 和 img
+        "background": "img/bg.C8CUoi7I.jpg", # 激活原版的背景图
+        "titleIcon": True # 激活原版的 Logo 显示
+    }
 
-def push_bark_direct(bark_key, title, body, image_url):
-    url = f"https://api.day.app/{bark_key}"
-    payload = {"title": title, "body": body}
-    if image_url:
-        payload["icon"] = image_url
-        payload["thumbnail"] = image_url
+# ================= 3. 图像渲染与上传 =================
+
+async def render_to_image(processed_data):
+    """渲染 HTML 并精准切割截图"""
+    if not processed_data or processed_data["product_count"] == 0:
+        print("当前无活跃商品，跳过渲染")
+        return None
+    
+    screenshot_file = "merchant_render.jpg"
+    temp_html_path = os.path.join(ASSETS_DIR, TEMP_RENDER_FILE)
+    
     try:
-        resp = requests.get(url, params=payload, timeout=30)
-        if resp.status_code == 200:
-            print(f"[INFO] Bark 推送已发送 (key={bark_key[:8]}...)")
-            return True
-        else:
-            print(f"[WARN] Bark HTTP: {resp.status_code}")
-            return False
+        env = Environment(loader=FileSystemLoader(ASSETS_DIR))
+        template = env.get_template(HTML_TEMPLATE_FILE)
+        rendered_html = template.render(processed_data)
+        
+        with open(temp_html_path, "w", encoding="utf-8") as f:
+            f.write(rendered_html)
+            
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            page = await browser.new_page()
+            
+            # --- 避开手机端错乱排版，恢复完美宽度 ---
+            await page.set_viewport_size({"width": 900, "height": 1200})
+            await page.goto(f"file://{temp_html_path}")
+            
+            # 等待字体加载完成
+            await page.evaluate("document.fonts.ready")
+            await page.wait_for_load_state("networkidle")
+            
+            # --- 定位原版 HTML 的包裹容器 ---
+            data_region = page.locator('.merchant-page')
+            await data_region.screenshot(path=screenshot_file, type="jpeg", quality=90)
+            
+            await browser.close()
+            print(f"✅ 图片渲染成功 (精准切割): {screenshot_file}")
+            return screenshot_file
+            
     except Exception as e:
-        print(f"[WARN] Bark 异常: {e}")
-        return False
+        print(f"❌ 渲染图片失败: {e}")
+        return None
+    finally:
+        if os.path.exists(temp_html_path): os.remove(temp_html_path)
 
-def push_direct(title, body, image_url):
-    ok = False
+async def upload_to_imgbb(image_path):
+    """上传到 ImgBB 图床"""
+    if not image_path or not IMGBB_KEY: return None
+    try:
+        with open(image_path, "rb") as f:
+            res = requests.post("https://api.imgbb.com/1/upload", data={"key": IMGBB_KEY}, files={"image": f}, timeout=30)
+            json_data = res.json()
+            if json_data.get("status") == 200:
+                print("✅ 图床上传成功")
+                return json_data["data"]["url"]
+            else:
+                print(f"❌ 图床上传失败: {json_data.get('error', {}).get('message')}")
+                return None
+    except Exception as e:
+        print(f"❌ 图床请求异常: {e}")
+        return None
+
+# ================= 4. 推送分发 =================
+
+def push_all(title, body, markdown, image_url):
+    """执行双通道推送"""
     if NOTIFYME_UUID:
-        ok = push_notifyme_direct(NOTIFYME_UUID, title, body, image_url) or ok
+        payload = {
+            "data": {
+                "uuid": NOTIFYME_UUID, "ttl": 86400, "priority": "high",
+                "data": {
+                    "title": title, "body": body, "group": "洛克王国", "bigText": True, "record": 1,
+                    "markdown": f"{markdown}\n\n![render]({image_url})" if image_url else markdown
+                }
+            }
+        }
+        try:
+            resp = requests.post(NOTIFYME_SERVER, json=payload, timeout=10)
+            print("NotifyMe HTTP:", resp.status_code, resp.text[:200])
+            if resp.status_code == 200 and resp.json().get("isSuccess"):
+                print("NotifyMe push sent OK")
+            else:
+                print("NotifyMe push FAILED:", resp.text[:200])
+        except Exception as e:
+            print("NotifyMe exception:", type(e).__name__, str(e))
+    
     if BARK_KEY:
-        ok = push_bark_direct(BARK_KEY, title, body, image_url) or ok
-    return ok
+        try:
+            requests.post(f"https://api.day.app/{BARK_KEY}", data={
+                "title": title, "body": body, "group": "洛克王国", "image": image_url, "isArchive": 1
+            }, timeout=10)
+            print("✅ Bark 推送已发送")
+        except: pass
+
+# ================= 5. 主入口 =================
 
 async def main():
     try:
-        print("[INFO] 正在查询洛克王国远行商人数据...")
-        goods = await fetch_goods()
-        print(f"[INFO] 获取到 {len(goods)} 个商品")
-
-        if not goods:
-            print("[INFO] 无商品，发送无商品通知")
-            push_direct("\u8fdc\u884c\u5546\u4eba - \u5f53\u524d\u65e0\u5546\u54c1", "\u76ee\u524d\u8fdc\u884c\u5546\u4eba\u5904\u6682\u65e0\u5546\u54c1\u4e0a\u67b6\uff0c\u4e0b\u6b21\u66f4\u65b0\u8bf7\u67e5\u770b\u3002", None)
-
-            subs = load_subscribers()
-            if subs:
-                for sub in subs:
-                    push_to_subscriber(sub, "\u8fdc\u884c\u5546\u4eba - \u65e0\u5546\u54c1", "\u76ee\u524d\u6682\u65e0\u5546\u54c1", None)
-            return
-
-        goods_list = ", ".join([g.get("name", "?") for g in goods[:10]])
-        print(f"[INFO] 商品: {goods_list}")
-
-        title = f"\u8fdc\u884c\u5546\u4eba\u6765\u4e86\uff01\u5171 {len(goods)} \u4ef6\u5546\u54c1"
-        push_body = goods_list
-        img_url = render_and_upload(goods)
-        if img_url:
-            print(f"[INFO] 图片: {img_url}")
-        else:
-            print("[WARN] 图片上传失败，继续推送（无图）")
-
-        push_direct(title, push_body, img_url)
-
-        subs = load_subscribers()
-        if subs:
-            print(f"[INFO] 正在群发给 {len(subs)} 位订阅者...")
-            ok_count = 0
-            for sub in subs:
-                key = sub.get("key", "")
-                plat = sub.get("platform", "")
-                if not key:
-                    continue
-                ok = push_to_subscriber(sub, title, push_body, img_url)
-                if ok:
-                    ok_count += 1
-                    print(f"[INFO] 订阅者推送成功 ({plat}): {key[:6]}...")
-                else:
-                    print(f"[FAIL] 订阅者推送失败 ({plat}): {key[:6]}...")
-            print(f"[INFO] 群发完成: {ok_count}/{len(subs)} 成功")
-        else:
-            print("[INFO] 无订阅者，跳过群发")
-
+        resp = requests.get(GAME_API_URL, headers={"X-API-Key": ROCOM_API_KEY}, timeout=30)
+        resp.raise_for_status()
+        raw_data = resp.json().get("data", {})
+        err = None if resp.json().get("code") == 0 else resp.json().get("message")
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        push_direct("[WARN] \u76d1\u63a7\u5f02\u5e38", str(e), None)
+        raw_data, err = None, f"请求异常: {e}"
+    
+    if err or not raw_data:
+        push_all("⚠️ 监控异常", err or "无法获取数据", "无法获取数据", None)
+        return
 
-asyncio.run(main())
+    processed = process_data_for_template(raw_data)
+    item_names = [p["name"] for p in processed["products"]]
+    push_body = f"当前售卖: {'、'.join(item_names)}" if item_names else "当前暂无商品"
+    
+    local_img = await render_to_image(processed)
+    img_url = await upload_to_imgbb(local_img)
+    
+    push_all("📢 远行商人已刷新", push_body, "### 🛒 商人刷新详情", img_url)
+
+if __name__ == "__main__":
+    asyncio.run(main())
